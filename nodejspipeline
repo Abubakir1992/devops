@@ -1,0 +1,137 @@
+image: atlassian/default-image:latest
+
+definitions:
+  steps:
+    - step: &dotnet-framework-deploy
+        name: Build dotnet
+        runs-on:
+          - self.hosted
+          - windows
+        clone:
+          enabled: true
+        script:
+          - msbuild modules/Insureon.Sitecore/Insureon.Sitecore.sln
+          - mkdir test_build
+          - Copy-Item "modules/Insureon.Sitecore/bin/Debug/*" -Destination "test_build" -Recurse
+          #- get-content appspec.yml | %{$_ -replace "dest_location","bin"}
+          - Copy-Item "appspec.yml" -Destination "test_build" -Recurse
+          - powershell Compress-Archive test_build  myapp.zip
+        artifacts:
+          - 'myapp.zip'
+    - step: &upload-to-s3-dotnet
+        name: Upload to S3 for dotnet
+        services:
+          - docker
+        script:
+          - pipe: atlassian/aws-code-deploy:0.2.10
+            variables:
+              AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID
+              AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY
+              AWS_DEFAULT_REGION: $AWS_DEFAULT_REGION
+              COMMAND: 'upload'
+              APPLICATION_NAME: $APPLICATION_NAME
+              DEPLOYMENT_GROUP: $DEPLOYMENT_GROUP
+              ZIP_FILE: 'myapp.zip'
+                      
+    - step: &Deploy-with-CodeDeploy-dotnet
+        name: Deploy-with-CodeDeploy for dotnet
+        services:
+          - docker
+        script:
+        # Test upload
+          - pipe: atlassian/aws-code-deploy:0.2.10
+            variables:
+              AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID
+              AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY
+              AWS_DEFAULT_REGION: $AWS_DEFAULT_REGION
+              COMMAND: 'deploy'
+              APPLICATION_NAME: $APPLICATION_NAME
+              DEPLOYMENT_GROUP: $DEPLOYMENT_GROUP
+              IGNORE_APPLICATION_STOP_FAILURES: 'true'
+              FILE_EXISTS_BEHAVIOR: 'OVERWRITE'
+              WAIT: 'true'
+
+  steps:
+    - step: &build-jss
+        name: Build JSS
+        image: node:14.16.1
+        script:
+          - apt-get update -y
+          - apt-get install zip -y
+          - npm install -g @sitecore-jss/sitecore-jss-cli
+          - npm install
+          - cp scjssconfig.$INSTANCE.json scjssconfig.json
+          - jss setup --nonInteractive --apiKey=$API_KEY --deploySecret=$DEPLOY_SECRET --instancePath=$INSTANCE_PATH --deployUrl=$DEPLOY_URL --layoutServiceHost=$LAYOUT_SERVICE_HOST
+          - mkdir cms-sitecore
+          - jss build
+          - cp -r ./build/* ./cms-sitecore/
+          - sed -i -e "s/bin/dist/g" appspec.yml
+          - zip -r app.zip ./cms-sitecore appspec.yml
+        artifacts:
+          - 'app.zip'   
+    - step: &upload-to-s3-jss
+        name: Upload to S3 for jss
+        services:
+          - docker
+        script:
+          - pipe: atlassian/aws-code-deploy:0.2.10
+            variables:
+              AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID
+              AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY
+              AWS_DEFAULT_REGION: $AWS_DEFAULT_REGION
+              S3_BUCKET: $S3_BUCKET_JSS
+              COMMAND: 'upload'
+              APPLICATION_NAME: $APPLICATION_NAME_JSS
+              DEPLOYMENT_GROUP: $DEPLOYMENT_GROUP_JSS
+              ZIP_FILE: 'app.zip'
+              
+              
+    - step: &Deploy-with-CodeDeploy-jss
+        name: Deploy-with-CodeDeploy for jss
+        services:
+          - docker
+        script:
+        # Test upload
+        - pipe: atlassian/aws-code-deploy:0.2.10
+          variables:
+            AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID
+            AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY
+            AWS_DEFAULT_REGION: $AWS_DEFAULT_REGION
+            COMMAND: 'deploy'
+            APPLICATION_NAME: $APPLICATION_NAME_JSS
+            DEPLOYMENT_GROUP: $DEPLOYMENT_GROUP_JSS
+            S3_BUCKET: $S3_BUCKET_JSS
+            IGNORE_APPLICATION_STOP_FAILURES: 'true'
+            FILE_EXISTS_BEHAVIOR: 'OVERWRITE'
+            WAIT: 'true'          
+              
+       
+pipelines:
+  branches:
+    feature/jss-and-dotnet-autodeploy:
+    - step:
+          <<: *dotnet-framework-deploy
+          name: Build dotnet for Sandbox
+          trigger: automatic     
+      - step:
+          <<: *upload-to-s3-dotnet
+          name: Upload to S3 for Sandbox dotnet
+          trigger: automatic
+      - step:
+          <<: *Deploy-with-CodeDeploy-dotnet
+          name: Deploy-with-CodeDeploy for dotnet
+          trigger: automatic
+
+      - step:
+          <<: *build-jss
+          name: Build JSS for Sandbox
+          deployment: sandbox
+          trigger: automatic
+      - step:
+          <<: *upload-to-s3-jss
+          name: Upload to S3 for Sandbox jss
+          trigger: automatic
+      - step:
+          <<: *Deploy-with-CodeDeploy-jss
+          name: Deploy with CodeDeploy for jss
+          trigger: automatic
